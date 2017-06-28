@@ -35,6 +35,7 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#include "utils/varlena.h"
 
 PG_MODULE_MAGIC;
 
@@ -494,7 +495,7 @@ log_audit_event(AuditEventStackItem *stackItem)
 
             switch (stackItem->auditEvent.commandTag)
             {
-                    /* Currently, only EXECUTE is different */
+                /* Currently, only EXECUTE is different */
                 case T_ExecuteStmt:
                     className = CLASS_MISC;
                     class = LOG_MISC;
@@ -596,8 +597,9 @@ log_audit_event(AuditEventStackItem *stackItem)
         case LOGSTMT_ALL:
             switch (stackItem->auditEvent.commandTag)
             {
-                    /* READ statements */
+                /* READ statements */
                 case T_CopyStmt:
+                case T_DeclareCursorStmt:
                 case T_SelectStmt:
                 case T_PrepareStmt:
                 case T_PlannedStmt:
@@ -605,7 +607,7 @@ log_audit_event(AuditEventStackItem *stackItem)
                     class = LOG_READ;
                     break;
 
-                    /* FUNCTION statements */
+                /* FUNCTION statements */
                 case T_DoStmt:
                     className = CLASS_FUNCTION;
                     class = LOG_FUNCTION;
@@ -1342,12 +1344,13 @@ pgaudit_ExecutorCheckPerms_hook(List *rangeTabls, bool abort)
  * Hook ProcessUtility to do session auditing for DDL and utility commands.
  */
 static void
-pgaudit_ProcessUtility_hook(Node *parsetree,
-                             const char *queryString,
-                             ProcessUtilityContext context,
-                             ParamListInfo params,
-                             DestReceiver *dest,
-                             char *completionTag)
+pgaudit_ProcessUtility_hook(PlannedStmt *pstmt,
+                            const char *queryString,
+                            ProcessUtilityContext context,
+                            ParamListInfo params,
+                            QueryEnvironment *queryEnv,
+                            DestReceiver *dest,
+                            char *completionTag)
 {
     AuditEventStackItem *stackItem = NULL;
     int64 stackId = 0;
@@ -1371,9 +1374,9 @@ pgaudit_ProcessUtility_hook(Node *parsetree,
             stackItem = stack_push();
 
         stackId = stackItem->stackId;
-        stackItem->auditEvent.logStmtLevel = GetCommandLogLevel(parsetree);
-        stackItem->auditEvent.commandTag = nodeTag(parsetree);
-        stackItem->auditEvent.command = CreateCommandTag(parsetree);
+        stackItem->auditEvent.logStmtLevel = GetCommandLogLevel(pstmt->utilityStmt);
+        stackItem->auditEvent.commandTag = nodeTag(pstmt->utilityStmt);
+        stackItem->auditEvent.command = CreateCommandTag(pstmt->utilityStmt);
         stackItem->auditEvent.commandText = queryString;
 
         /*
@@ -1388,11 +1391,11 @@ pgaudit_ProcessUtility_hook(Node *parsetree,
 
     /* Call the standard process utility chain. */
     if (next_ProcessUtility_hook)
-        (*next_ProcessUtility_hook) (parsetree, queryString, context,
-                                     params, dest, completionTag);
+        (*next_ProcessUtility_hook) (pstmt, queryString, context, params,
+                                     queryEnv, dest, completionTag);
     else
-        standard_ProcessUtility(parsetree, queryString, context,
-                                params, dest, completionTag);
+        standard_ProcessUtility(pstmt, queryString, context, params,
+                                queryEnv, dest, completionTag);
 
     /*
      * Process the audit event if there is one.  Also check that this event
@@ -1845,7 +1848,7 @@ _PG_init(void)
 
         "Specifies that session logging should be enabled in the case where "
         "all relations in a statement are in pg_catalog.  Disabling this "
-         "setting will reduce noise in the log from tools like psql and PgAdmin "
+        "setting will reduce noise in the log from tools like psql and PgAdmin "
         "that query the catalog heavily.",
 
         NULL,
